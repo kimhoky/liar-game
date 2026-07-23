@@ -143,6 +143,7 @@ function startGame(room) {
     liarId,
     order,
     turnIndex: 0,
+    spoken: {}, // playerId -> true (해당 턴에 이미 발언했는지)
     votes: {}, // voterId -> targetId
     accusedId: null,
     finalVotes: {}, // voterId -> 'DEATH' | 'SURVIVE'
@@ -286,13 +287,16 @@ function startFinalVote(room) {
   room.status = 'FINAL_VOTE';
   room.game.finalVotes = {};
   broadcastRoomState(room);
-  io.to(room.id).emit('phaseChanged', { phase: 'FINAL_VOTE', seconds: FINAL_VOTE_TIME });
+  const totalVoters = alivePlayers(room).filter(p => p.id !== room.game.accusedId).length;
+  io.to(room.id).emit('phaseChanged', { phase: 'FINAL_VOTE', seconds: FINAL_VOTE_TIME, totalVoters });
 
   startTimer(room, FINAL_VOTE_TIME,
     (remain) => io.to(room.id).emit('timer', { phase: 'FINAL_VOTE', remain }),
     () => tallyFinalVote(room)
   );
 }
+
+const GUESS_TIME = 15;
 
 function tallyFinalVote(room) {
   const g = room.game;
@@ -310,7 +314,14 @@ function tallyFinalVote(room) {
     if (accused) accused.alive = false;
     const isLiar = g.accusedId === g.liarId;
 
-    setTimeout(() => revealResult(room, isLiar), 3000);
+    setTimeout(() => {
+      if (!rooms[room.id]) return;
+      if (isLiar) {
+        startGuessPhase(room);
+      } else {
+        revealResult(room, false, null);
+      }
+    }, 3000);
   } else {
     // 생존 -> 1분 토론 후 재투표
     setTimeout(() => {
@@ -319,11 +330,33 @@ function tallyFinalVote(room) {
   }
 }
 
-function revealResult(room, accusedWasLiar) {
+function startGuessPhase(room) {
+  room.status = 'GUESS';
+  broadcastRoomState(room);
+  const liar = room.players.find(p => p.id === room.game.liarId);
+  io.to(room.id).emit('phaseChanged', {
+    phase: 'GUESS',
+    seconds: GUESS_TIME,
+    liarId: room.game.liarId,
+    liarNickname: liar ? liar.nickname : ''
+  });
+
+  startTimer(room, GUESS_TIME,
+    (remain) => io.to(room.id).emit('timer', { phase: 'GUESS', remain }),
+    () => revealResult(room, true, null) // 시간 초과 -> 라이어 정답 실패로 간주, 시민 승리
+  );
+}
+
+function revealResult(room, accusedWasLiar, guessResult) {
   room.status = 'REVEAL';
   broadcastRoomState(room);
   const g = room.game;
   const liar = room.players.find(p => p.id === g.liarId);
+
+  let winner = accusedWasLiar ? 'CITIZENS' : 'LIAR';
+  if (accusedWasLiar && guessResult === true) {
+    winner = 'LIAR'; // 라이어가 정답을 맞춰 역전승
+  }
 
   io.to(room.id).emit('gameOver', {
     accusedWasLiar,
@@ -332,7 +365,8 @@ function revealResult(room, accusedWasLiar) {
     citizenWord: g.citizenWord,
     liarWord: g.liarWord,
     category: g.category,
-    winner: accusedWasLiar ? 'CITIZENS' : 'LIAR'
+    guessResult,
+    winner
   });
 
   clearTimer(room);
@@ -439,10 +473,42 @@ io.on('connection', (socket) => {
     if (!room) return;
     const player = room.players.find(p => p.id === socket.id);
     if (!player) return;
+    const trimmed = String(message).slice(0, 300).trim();
+    if (!trimmed) return;
+
+    // DESCRIBE 단계: 본인 차례가 아니면 거부
+    if (room.status === 'DESCRIBE' && room.game) {
+      const g = room.game;
+      const currentId = g.order[g.turnIndex];
+      if (socket.id !== currentId) {
+        socket.emit('notYourTurn', {});
+        return;
+      }
+      if (g.spoken && g.spoken[socket.id]) {
+        socket.emit('notYourTurn', {});
+        return;
+      }
+      g.spoken = g.spoken || {};
+      g.spoken[socket.id] = true;
+
+      io.to(roomId).emit('describeMessage', {
+        playerId: socket.id,
+        nickname: player.nickname,
+        message: trimmed,
+        ts: Date.now()
+      });
+
+      // 발언 완료 -> 즉시 다음 사람으로 진행
+      clearTimer(room);
+      g.turnIndex += 1;
+      runDescribeTurn(room);
+      return;
+    }
+
     io.to(roomId).emit('chatMessage', {
       playerId: socket.id,
       nickname: player.nickname,
-      message: String(message).slice(0, 300),
+      message: trimmed,
       ts: Date.now()
     });
   });
@@ -453,10 +519,14 @@ io.on('connection', (socket) => {
     const voter = room.players.find(p => p.id === socket.id);
     if (!voter || !voter.alive) return;
     room.game.votes[socket.id] = targetId;
-    io.to(roomId).emit('voteProgress', {
-      votedCount: Object.keys(room.game.votes).length,
-      totalCount: alivePlayers(room).length
-    });
+    const votedCount = Object.keys(room.game.votes).length;
+    const totalCount = alivePlayers(room).length;
+    io.to(roomId).emit('voteProgress', { votedCount, totalCount });
+
+    if (votedCount >= totalCount) {
+      clearTimer(room);
+      tallyVotes(room);
+    }
   });
 
   socket.on('castFinalVote', ({ roomId, decision }) => {
@@ -464,12 +534,32 @@ io.on('connection', (socket) => {
     if (!room || room.status !== 'FINAL_VOTE' || !room.game) return;
     const voter = room.players.find(p => p.id === socket.id);
     if (!voter || !voter.alive) return;
+    if (socket.id === room.game.accusedId) return; // 피고인은 투표 불가
     if (decision !== 'DEATH' && decision !== 'SURVIVE') return;
     room.game.finalVotes[socket.id] = decision;
-    io.to(roomId).emit('finalVoteProgress', {
-      votedCount: Object.keys(room.game.finalVotes).length,
-      totalCount: alivePlayers(room).length
-    });
+
+    const votedCount = Object.keys(room.game.finalVotes).length;
+    const totalCount = alivePlayers(room).filter(p => p.id !== room.game.accusedId).length;
+    io.to(roomId).emit('finalVoteProgress', { votedCount, totalCount });
+
+    if (votedCount >= totalCount) {
+      clearTimer(room);
+      tallyFinalVote(room);
+    }
+  });
+
+  socket.on('submitGuess', ({ roomId, guess }) => {
+    const room = rooms[roomId];
+    if (!room || room.status !== 'GUESS' || !room.game) return;
+    if (socket.id !== room.game.liarId) return;
+
+    clearTimer(room);
+    const correct = String(guess).trim() === room.game.citizenWord;
+    io.to(roomId).emit('guessSubmitted', { guess: String(guess).trim(), correct });
+
+    setTimeout(() => {
+      if (rooms[room.id]) revealResult(room, true, correct);
+    }, 2000);
   });
 
   socket.on('backToLobby', ({ roomId }) => {

@@ -7,7 +7,7 @@ import GameBoard from './components/GameBoard.vue';
 
 const inRoom = computed(() => !!state.roomId);
 const inGame = computed(() =>
-  ['DESCRIBE', 'DISCUSSION', 'VOTE', 'DEFENSE', 'FINAL_VOTE', 'REVEAL'].includes(state.status)
+  ['DESCRIBE', 'DISCUSSION', 'VOTE', 'DEFENSE', 'FINAL_VOTE', 'GUESS', 'REVEAL'].includes(state.status)
 );
 </script>
 

@@ -1,8 +1,9 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { socket, state } from '../composables/useSocket.js';
 import TimerBadge from './TimerBadge.vue';
 import ChatBox from './ChatBox.vue';
+import DescribeLogPanel from './DescribeLogPanel.vue';
 
 const phaseLabel = computed(() => ({
   DESCRIBE: '순서대로 설명하기',
@@ -10,6 +11,7 @@ const phaseLabel = computed(() => ({
   VOTE: '라이어 지목 투표',
   DEFENSE: '최후 변론',
   FINAL_VOTE: '최종 결정',
+  GUESS: '라이어의 마지막 기회',
   REVEAL: '결과 발표'
 }[state.status] || ''));
 
@@ -18,7 +20,8 @@ const phaseTotalSeconds = computed(() => ({
   DISCUSSION: state.discussionRound > 1 ? 60 : 180,
   VOTE: 30,
   DEFENSE: 30,
-  FINAL_VOTE: 20
+  FINAL_VOTE: 20,
+  GUESS: 15
 }[state.timerPhase] || 60));
 
 const isMyTurn = computed(() => state.currentTurn?.playerId === socket.id);
@@ -47,6 +50,15 @@ function backToLobby() {
 }
 
 const isHost = computed(() => state.hostId === socket.id);
+
+const isGuesser = computed(() => state.guessLiarId === socket.id);
+const guessInput = ref('');
+
+function submitGuess() {
+  const g = guessInput.value.trim();
+  if (!g) return;
+  socket.emit('submitGuess', { roomId: state.roomId, guess: g });
+}
 
 const sortedVoteCounts = computed(() => {
   return Object.entries(state.voteCounts)
@@ -79,6 +91,8 @@ const sortedVoteCounts = computed(() => {
     </div>
 
     <div v-if="!isAlive" class="dead-banner">💀 탈락했습니다. 결과를 지켜보세요.</div>
+
+    <DescribeLogPanel v-if="['DESCRIBE', 'DISCUSSION'].includes(state.status)" />
 
     <div class="main-area">
       <!-- DESCRIBE -->
@@ -151,11 +165,39 @@ const sortedVoteCounts = computed(() => {
         </div>
       </div>
 
+      <!-- GUESS -->
+      <div v-else-if="state.status === 'GUESS'" class="phase-panel guess-panel">
+        <h3>⚡ {{ state.guessLiarNickname }}님이 라이어였습니다!</h3>
+        <p class="dim">15초 안에 시민들의 제시어를 맞추면 역전승할 수 있습니다.</p>
+
+        <div v-if="isGuesser && !state.guessSubmitted" class="guess-input-row">
+          <input
+            v-model="guessInput"
+            placeholder="시민 제시어를 입력하세요..."
+            maxlength="30"
+            @keyup.enter="submitGuess"
+          />
+          <button class="guess-submit-btn" @click="submitGuess">제출</button>
+        </div>
+        <p v-else-if="!state.guessSubmitted" class="dim">{{ state.guessLiarNickname }}님이 정답을 입력하고 있습니다...</p>
+
+        <div v-if="state.guessSubmitted" class="guess-result">
+          <p>제출한 답: <strong>{{ state.guessSubmitted.guess }}</strong></p>
+          <p class="result-text">{{ state.guessSubmitted.correct ? '🎯 정답입니다! 라이어의 역전승!' : '❌ 오답입니다. 시민 승리!' }}</p>
+        </div>
+      </div>
+
       <!-- REVEAL -->
       <div v-else-if="state.status === 'REVEAL'" class="phase-panel reveal-panel">
         <h2>{{ state.gameResult?.winner === 'CITIZENS' ? '🎉 시민 승리!' : '😈 라이어 승리!' }}</h2>
         <p class="reveal-line">
           라이어는 <strong>{{ state.gameResult?.liarNickname }}</strong>님이었습니다!
+        </p>
+        <p v-if="state.gameResult?.guessResult === true" class="reveal-line highlight">
+          라이어가 제시어를 맞춰 역전승했습니다!
+        </p>
+        <p v-else-if="state.gameResult?.guessResult === false" class="reveal-line dim">
+          라이어가 정답을 맞추지 못했습니다.
         </p>
         <div class="word-reveal">
           <div><span class="tag">시민 제시어</span> {{ state.gameResult?.citizenWord }}</div>
@@ -327,6 +369,43 @@ const sortedVoteCounts = computed(() => {
 .result-text { font-weight: 700; margin-top: 6px; }
 
 .reveal-panel { text-align: center; }
+
+.guess-panel { text-align: center; }
+
+.guess-input-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+  max-width: 400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.guess-input-row input {
+  flex: 1;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(0,0,0,0.25);
+  color: white;
+  font-size: 1rem;
+}
+
+.guess-input-row input:focus { outline: none; border-color: #ff6b9d; }
+
+.guess-submit-btn {
+  background: linear-gradient(135deg, #ff6b9d, #c73866);
+  color: white;
+  border: none;
+  padding: 0 24px;
+  border-radius: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.guess-result {
+  margin-top: 20px;
+}
 
 .reveal-line { font-size: 1.1rem; margin: 12px 0; }
 

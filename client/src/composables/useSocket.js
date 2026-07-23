@@ -42,7 +42,17 @@ export const state = reactive({
   finalVotedCount: 0,
   finalTotalVoters: 0,
 
-  gameResult: null, // { accusedWasLiar, liarNickname, citizenWord, liarWord, category, winner }
+  // 순서대로 발언 기록 (상단 고정 패널용)
+  describeLog: [], // { playerId, nickname, message, ts }
+  notYourTurnAlert: 0, // 값이 바뀔 때마다 알림 트리거 (증가 카운터)
+  mySpoken: false,
+
+  // 라이어 정답 맞추기 단계
+  guessLiarId: null,
+  guessLiarNickname: '',
+  guessSubmitted: null, // { guess, correct }
+
+  gameResult: null, // { accusedWasLiar, liarNickname, citizenWord, liarWord, category, guessResult, winner }
 
   chatMessages: [],
   systemMessages: [],
@@ -69,6 +79,11 @@ export function resetGameState() {
   state.gameResult = null;
   state.chatMessages = [];
   state.voteTied = false;
+  state.describeLog = [];
+  state.mySpoken = false;
+  state.guessLiarId = null;
+  state.guessLiarNickname = '';
+  state.guessSubmitted = null;
 }
 
 socket.on('roomList', (list) => {
@@ -93,12 +108,22 @@ socket.on('yourWord', ({ category, word, isLiar }) => {
 socket.on('gameStarted', ({ category, order }) => {
   state.order = order;
   state.myCategory = category;
+  state.describeLog = [];
 });
 
 socket.on('describeTurn', ({ playerId, nickname, turnIndex, total }) => {
   state.currentTurn = { playerId, nickname };
   state.turnIndex = turnIndex;
   state.turnTotal = total;
+  state.mySpoken = false;
+});
+
+socket.on('describeMessage', (msg) => {
+  state.describeLog.push(msg);
+});
+
+socket.on('notYourTurn', () => {
+  state.notYourTurnAlert += 1;
 });
 
 socket.on('phaseChanged', (payload) => {
@@ -109,6 +134,9 @@ socket.on('phaseChanged', (payload) => {
   if (payload.accusedId) state.accusedId = payload.accusedId;
   if (payload.accusedNickname) state.accusedNickname = payload.accusedNickname;
   if (payload.round) state.discussionRound = payload.round;
+  if (payload.totalVoters !== undefined) state.finalTotalVoters = payload.totalVoters;
+  if (payload.liarId) state.guessLiarId = payload.liarId;
+  if (payload.liarNickname) state.guessLiarNickname = payload.liarNickname;
   state.myVoteTarget = null;
   state.myFinalVote = null;
   state.voteTied = false;
@@ -140,6 +168,10 @@ socket.on('finalVoteProgress', ({ votedCount, totalCount }) => {
 
 socket.on('finalVoteResult', ({ deathCount, surviveCount, isDeath }) => {
   state.finalVoteCounts = { deathCount, surviveCount, isDeath };
+});
+
+socket.on('guessSubmitted', (data) => {
+  state.guessSubmitted = data;
 });
 
 socket.on('gameOver', (result) => {
