@@ -2,7 +2,6 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const { nanoid } = require('nanoid');
 const fs = require('fs');
 const path = require('path');
 
@@ -36,8 +35,17 @@ const SURVIVE_DISCUSSION_TIME = 60; // 1분
 // rooms: { roomId: RoomState }
 const rooms = {};
 
-function createRoom(roomName, hostSocketId, hostNickname) {
-  const roomId = nanoid(6);
+function generateRoomCode() {
+  let code;
+  do {
+    code = String(Math.floor(100000 + Math.random() * 900000)); // 6자리 숫자
+  } while (rooms[code]);
+  return code;
+}
+
+function createRoom(roomName, hostSocketId, hostNickname, password) {
+  const roomId = generateRoomCode();
+  const isPrivate = !!password;
   rooms[roomId] = {
     id: roomId,
     name: roomName,
@@ -47,6 +55,8 @@ function createRoom(roomName, hostSocketId, hostNickname) {
     ],
     status: 'WAITING', // WAITING, DESCRIBE, DISCUSSION, VOTE, DEFENSE, FINAL_VOTE, REVEAL, END
     settings: { categories: [...CATEGORIES] },
+    isPrivate,
+    password: isPrivate ? String(password) : null,
     game: null, // 게임 진행 중 상태
     timer: null
   };
@@ -60,7 +70,8 @@ function publicRoomList() {
       id: r.id,
       name: r.name,
       count: r.players.length,
-      max: MAX_PLAYERS
+      max: MAX_PLAYERS,
+      isPrivate: r.isPrivate
     }));
 }
 
@@ -84,7 +95,8 @@ function broadcastRoomState(room) {
     hostId: room.hostId,
     players: publicPlayers(room),
     status: room.status,
-    settings: room.settings
+    settings: room.settings,
+    isPrivate: room.isPrivate
   });
 }
 
@@ -425,19 +437,23 @@ function removePlayerFromRoom(socketId) {
 io.on('connection', (socket) => {
   socket.emit('roomList', publicRoomList());
 
-  socket.on('createRoom', ({ roomName, nickname }, cb) => {
-    const room = createRoom(roomName || '라이어 게임방', socket.id, nickname || '플레이어');
+  socket.on('createRoom', ({ roomName, nickname, password }, cb) => {
+    const trimmedPw = password ? String(password).trim() : '';
+    const room = createRoom(roomName || '라이어 게임방', socket.id, nickname || '플레이어', trimmedPw || null);
     socket.join(room.id);
     broadcastRoomList();
     broadcastRoomState(room);
     cb && cb({ ok: true, roomId: room.id });
   });
 
-  socket.on('joinRoom', ({ roomId, nickname }, cb) => {
+  socket.on('joinRoom', ({ roomId, nickname, password }, cb) => {
     const room = rooms[roomId];
     if (!room) return cb && cb({ ok: false, error: '존재하지 않는 방입니다.' });
     if (room.status !== 'WAITING') return cb && cb({ ok: false, error: '이미 게임이 진행중입니다.' });
     if (room.players.length >= MAX_PLAYERS) return cb && cb({ ok: false, error: '방이 가득 찼습니다.' });
+    if (room.isPrivate && room.password !== String(password || '').trim()) {
+      return cb && cb({ ok: false, error: '비밀번호가 일치하지 않습니다.' });
+    }
 
     room.players.push({ id: socket.id, nickname: nickname || '플레이어', isHost: false, alive: true });
     socket.join(roomId);
